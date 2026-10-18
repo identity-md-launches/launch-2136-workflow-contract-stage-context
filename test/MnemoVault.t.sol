@@ -431,11 +431,80 @@ contract MnemoVaultTest is Test {
         vault.grant(agent, "");
     }
 
-    function test_grantRevertsWhenAlreadyGranted() public {
+    function test_grantAgainResealsWithoutRotating() public {
+        _registerAndGrant(alice, agent);
+        assertEq(vault.epochOf(alice), 0);
+
+        vm.expectEmit(address(vault));
+        emit Granted(alice, agent, 0, hex"c0ffee");
+        vm.prank(alice);
+        vault.grant(agent, hex"c0ffee");
+
+        assertTrue(vault.isGranted(alice, agent));
+        assertEq(vault.epochOf(alice), 0, "re-sealing must not rotate");
+    }
+
+    function test_grantResealsStillGrantedAgentAfterRevokingAnother() public {
+        address agentB = makeAddr("agentB");
+        _registerAndGrant(alice, agent);
+        _registerAndGrant(alice, agentB);
+
+        // Revoking agentB rotates alice's epoch; agent keeps its grant but holds an epoch-0 key.
+        vm.prank(alice);
+        vault.revoke(agentB);
+        assertEq(vault.epochOf(alice), 1);
+        assertTrue(vault.isGranted(alice, agent));
+        assertFalse(vault.isGranted(alice, agentB));
+
+        // Alice hands agent the epoch-1 key without another rotation.
+        vm.expectEmit(address(vault));
+        emit Granted(alice, agent, 1, hex"aa01");
+        vm.prank(alice);
+        vault.grant(agent, hex"aa01");
+        assertEq(vault.epochOf(alice), 1);
+        assertTrue(vault.isGranted(alice, agent));
+        assertFalse(vault.isGranted(alice, agentB));
+
+        // The re-keyed agent writes under the current epoch; the revoked one still cannot.
+        vm.prank(agent);
+        vault.writeFor(alice, _notes(1, 10), 1);
+        vm.prank(agentB);
+        vm.expectRevert(abi.encodeWithSelector(MnemoVault.NotGranted.selector, alice, agentB));
+        vault.writeFor(alice, _notes(1, 10), 1);
+    }
+
+    function test_grantResealsEveryAgentAfterRotate() public {
+        address agentB = makeAddr("agentB");
+        _registerAndGrant(alice, agent);
+        _registerAndGrant(alice, agentB);
+
+        vm.prank(alice);
+        vault.rotate();
+        assertEq(vault.epochOf(alice), 1);
+
+        vm.startPrank(alice);
+        vm.expectEmit(address(vault));
+        emit Granted(alice, agent, 1, hex"aa01");
+        vault.grant(agent, hex"aa01");
+        vm.expectEmit(address(vault));
+        emit Granted(alice, agentB, 1, hex"bb01");
+        vault.grant(agentB, hex"bb01");
+        vm.stopPrank();
+
+        // Both agents are keyed at the current epoch and no extra rotation happened.
+        assertEq(vault.epochOf(alice), 1);
+        assertTrue(vault.isGranted(alice, agent));
+        assertTrue(vault.isGranted(alice, agentB));
+    }
+
+    function test_grantResealStillRequiresRegisteredAgentAndKey() public {
         _registerAndGrant(alice, agent);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(MnemoVault.AlreadyGranted.selector, alice, agent));
-        vault.grant(agent, hex"c0ffee");
+        vm.expectRevert(MnemoVault.EmptySealedKey.selector);
+        vault.grant(agent, "");
+        vm.prank(alice);
+        vm.expectRevert(MnemoVault.SelfGrant.selector);
+        vault.grant(alice, hex"01");
     }
 
     function test_revokeClearsGrantAndRotates() public {

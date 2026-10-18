@@ -617,22 +617,6 @@
   },
   {
     "type": "error",
-    "name": "AlreadyGranted",
-    "inputs": [
-      {
-        "name": "owner",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "agent",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "EmptyNote",
     "inputs": [
       {

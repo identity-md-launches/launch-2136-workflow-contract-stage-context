@@ -101,7 +101,6 @@ contract MnemoVault is Ownable2Step {
     error WrongEpoch(uint32 expected, uint32 given);
     error NotNoteOwner(uint256 id);
     error NotGranted(address owner, address agent);
-    error AlreadyGranted(address owner, address agent);
     error AgentNotRegistered(address agent);
     error SelfGrant();
     error EmptySealedKey();
@@ -159,7 +158,8 @@ contract MnemoVault is Ownable2Step {
     }
 
     /// @notice Advance the caller's key epoch. Later notes are sealed under the new epoch's key, so
-    ///         anyone holding only an older sealed key cannot read them.
+    ///         anyone holding only an older sealed key cannot read them. Grants are untouched: the
+    ///         owner hands each agent it keeps the new epoch's key by calling `grant` again.
     function rotate() external {
         _rotate(msg.sender);
     }
@@ -178,12 +178,14 @@ contract MnemoVault is Ownable2Step {
 
     /// @notice Grant `agent` write access to the caller's vault. `sealedKey` is the caller's current
     ///         vault key sealed to the agent's registered x25519 key; the contract only relays it.
+    ///         Calling it again for an agent that is already granted re-seals: the grant stays, the
+    ///         epoch does not move, and `Granted` carries the key for the caller's current epoch. This is
+    ///         how an owner re-keys the agents it keeps after `rotate` or after revoking another agent.
     function grant(address agent, bytes calldata sealedKey) external {
         if (agent == address(0)) revert ZeroAddress();
         if (agent == msg.sender) revert SelfGrant();
         if (_keyOf[agent] == bytes32(0)) revert AgentNotRegistered(agent);
         if (sealedKey.length == 0) revert EmptySealedKey();
-        if (_granted[msg.sender][agent]) revert AlreadyGranted(msg.sender, agent);
         _granted[msg.sender][agent] = true;
         emit Granted(msg.sender, agent, _epochOf[msg.sender], sealedKey);
     }

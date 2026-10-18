@@ -92,7 +92,8 @@ contract VaultHandler is Test {
     function grant(uint256 ownerSeed, uint256 agentSeed) external {
         address owner = _actor(ownerSeed);
         address agent = _actor(agentSeed);
-        if (owner == agent || vault.isGranted(owner, agent)) return;
+        // A grant to an already-granted agent is a re-seal and must also succeed.
+        if (owner == agent) return;
         if (vault.keyOf(agent) == bytes32(0)) {
             vm.prank(agent);
             vault.register(keccak256(abi.encodePacked(agent)));

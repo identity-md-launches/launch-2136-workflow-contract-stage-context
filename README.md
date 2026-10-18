@@ -48,12 +48,13 @@ constructor(address token_, address owner_)
 | Argument | Launch value | Meaning                                                              |
 | -------- | ------------ | -------------------------------------------------------------------- |
 | `token_` | `$token`     | The MNEMO `LaunchToken`. Stored as an immutable; never called at deploy. |
-| `owner_` | `$owner`     | The launch owner (`0xc91633279dd9fa90d69f3c1b48c18a96fbd8ab67`). Only `setStamp`. |
+| `owner_` | `$owner`     | The launch owner. Only `setStamp` and the two-step ownership transfer.   |
 
 Both must be non-zero. The constructor makes no external call and needs no other contract to exist, so it
 runs on the empty chain the launch checks use. `MnemoVault` must be listed after the token in the manifest
 because it references `$token`. The owner is the explicit argument, never `msg.sender` (the factory) or
-`tx.origin`.
+`tx.origin`. `$owner` is resolved by the manifest step from the launch itself (the owner the request named,
+else the wallet that paid); no literal owner address belongs in this repository or in `launch.json`.
 
 ### Constants the contract enforces
 
@@ -72,7 +73,8 @@ Choices the brief left open, made here and documented:
   would be a free way to bump counters.
 - A `sealedKey` passed to `grant` must be non-empty; there is no upper bound, since the caller pays the gas.
 - `grant` requires the agent to have called `register` first, so the owner has a key to seal the vault key
-  to, and rejects granting yourself or an already-granted agent.
+  to, and rejects granting yourself. Granting an already-granted agent succeeds and is the re-seal path: the
+  grant stays, the epoch does not move, and `Granted` relays the key for the owner's current epoch.
 - `forget` is all-or-nothing and a forgotten id cannot be forgotten twice (`NotNoteOwner`).
 - `register` may be called again to replace a key. A zero key is rejected.
 
@@ -83,7 +85,7 @@ Choices the brief left open, made here and documented:
 | Anyone with MNEMO | `write(bytes[] notes, uint32 epoch)`                  | Seals 1–16 notes into the caller's vault; burns `stamp × notes` from the caller.             |
 | Note owner        | `forget(uint256[] ids)`                               | Marks the caller's live notes forgotten; emits `Forgotten` per id.                           |
 | Vault owner       | `rotate()`                                            | Epoch + 1; emits `Rotated`.                                                                  |
-| Vault owner       | `grant(address agent, bytes sealedKey)`               | Agent may `writeFor` this vault; emits `Granted(owner, agent, epoch, sealedKey)`.            |
+| Vault owner       | `grant(address agent, bytes sealedKey)`               | Agent may `writeFor` this vault; emits `Granted(owner, agent, epoch, sealedKey)`. Repeatable: a second call re-seals the current epoch's key. |
 | Vault owner       | `revoke(address agent)`                               | Removes the grant and rotates the epoch; emits `Revoked` then `Rotated`.                     |
 | Granted agent     | `writeFor(address owner, bytes[] notes, uint32 epoch)` | Seals notes into `owner`'s vault; burns the stamp from the agent's own MNEMO.               |
 | Anyone            | `register(bytes32 x25519PublicKey)`                   | Publishes a key so vault owners can grant this address; emits `KeyRegistered`.               |
@@ -110,6 +112,14 @@ not touch earlier ciphertext, which stays on chain; it only makes later notes un
 only an older sealed key. The site derives the vault key as HKDF of a wallet signature and the epoch; the
 contract never sees keys or plaintext.
 
+Rotation leaves every grant in place. After `rotate`, or after `revoke` of one agent, each agent the owner
+keeps still passes `writeFor` but only holds the key `Granted` relayed for an earlier epoch. The owner re-keys
+them by calling `grant(agent, sealedKey)` again with the current epoch's key sealed to each agent: the call
+succeeds for an already-granted agent, does not rotate, and emits `Granted(owner, agent, epochOf(owner),
+sealedKey)`. An agent should read the latest `Granted` event for its address whose `epoch` equals
+`epochOf(owner)` before sealing a note; if there is none, the owner has not re-keyed it yet and a write would
+burn the stamp for ciphertext sealed under a stale key.
+
 ## Assumptions and trust
 
 - **Ciphertext only.** The contract stores whatever bytes it receives in events. It cannot check that they are
@@ -118,9 +128,14 @@ contract never sees keys or plaintext.
 - **Burn is final.** Tokens sent to `0x…dEaD` are unrecoverable. `burnedTotal()` equals the MNEMO this
   contract has sent there (tested as an invariant), but the dead address may also receive MNEMO from elsewhere.
 - **Stamp is the owner's one lever.** The launch owner can move the per-note price between 100 and 100,000
-  MNEMO at any time, for future writes only. A user who approved a large allowance and signs a `write` after a
-  stamp increase pays the new price; the site should show the current `stamp()` before every transaction.
-  This power is required by the brief and is a trust assumption on the owner.
+  MNEMO at any time, for future writes only, and the change applies to any `write` or `writeFor` mined after
+  it, including transactions already signed at the old price. `write` and `writeFor` have the signatures the
+  brief fixes and carry no maximum-stamp argument, so the writer's only on-chain protection is the allowance:
+  with `approve(vault, stamp × n)` for exactly the quoted amount, a write mined after an increase reverts with
+  `ERC20InsufficientAllowance` and nothing burns; with an unlimited allowance it pays the new price, up to 50×
+  the quote at the range's extremes. The site and the agent script must therefore approve exactly
+  `stamp() × n` per transaction and never an unlimited allowance. This power is required by the brief and is
+  a trust assumption on the owner; a delayed or bounded stamp change would be a scope change for the requester.
 - **Agents pay their own stamp.** `writeFor` never touches the vault owner's balance. An agent can only add
   notes, never forget them, and only while granted and only under the owner's current epoch.
 - **Grants are per owner.** A grant from Alice does not let the agent write to Bob's vault.
@@ -138,16 +153,20 @@ contract never sees keys or plaintext.
   outside [100e18, 100_000e18] reverts.
 - **Owner key hygiene.** `$owner` is the only address that can change the stamp or hand over ownership.
   Ownership transfer is two-step; renouncing is impossible, so the owner key should be kept recoverable.
-- **Site integration.** Clients must `approve(vault, stamp × n)` before `write`/`writeFor`, pass
-  `epochOf(owner)` as the epoch, and read notes by indexing `Noted` events (dropping ids that appear in
-  `Forgotten`). Network totals come from `notesTotal()` and `burnedTotal()`.
+- **Site integration.** Clients must `approve(vault, stamp × n)` for exactly the quoted amount before each
+  `write`/`writeFor` (never `type(uint256).max`, see "Stamp is the owner's one lever"), pass `epochOf(owner)`
+  as the epoch, and read notes by indexing `Noted` events (dropping ids that appear in `Forgotten`). Network
+  totals come from `notesTotal()` and `burnedTotal()`.
+- **Re-keying agents.** After `rotate` or `revoke`, the owner calls `grant` again for every agent it keeps,
+  with the new epoch's key sealed to that agent; the Agents page should offer this for each granted agent
+  whose last `Granted` epoch is behind `epochOf(owner)`.
 - **Not deployed here.** IMD's deployer launches both contracts through the factory after review. This
   repository contains no deploy scripts, keys or broadcast artefacts, and no `launch.json` (the manifest
   step writes it). Explorer verification belongs to the deployer.
 
 ## Tests
 
-`forge test` runs 64 tests across three suites:
+`forge test` runs 67 tests across three suites:
 
 - `test/LaunchToken.t.sol`: metadata, whole supply to the deployer, exact transfers, allowance, no mint, a
   conservation fuzz.
@@ -155,7 +174,8 @@ contract never sees keys or plaintext.
   and every failure path (no notes, too many, too long, empty note, wrong epoch, no balance, no allowance,
   partial balance), stamp changes applying to future writes only, `forget` (own, foreign, unknown, double,
   all-or-nothing, agent cannot forget), `rotate`, `register`, `grant`/`revoke` (unregistered, zero, self,
-  duplicate, revoke rotates, re-grant), `writeFor` (pays from agent, attribution, revoked, stale epoch, per
+  re-seal of a granted agent without rotating, re-seal after revoking another agent, re-seal of every agent
+  after `rotate`, revoke rotates, re-grant after revoke), `writeFor` (pays from agent, attribution, revoked, stale epoch, per
   owner, limits, broke agent), owner powers (range, access, two-step transfer, renounce disabled), and fuzz
   tests for stamp × count burning, stamp range, epochs and forget authorisation.
 - `test/MnemoVault.invariant.t.sol`: a handler drives four actors through every function; invariants hold
