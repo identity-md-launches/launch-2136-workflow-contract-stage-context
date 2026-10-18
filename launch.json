@@ -1,0 +1,25 @@
+{
+  "kind": "evm_project",
+  "token": {
+    "contract": "LaunchToken",
+    "name": "Mnemo",
+    "symbol": "MNEMO",
+    "decimals": 18
+  },
+  "contracts": [
+    {
+      "contract": "MnemoVault",
+      "constructorArgs": [
+        "$token",
+        "$owner"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "MnemoVault records ciphertext note events, tracks key epochs and agent permissions, and sends an initial stamp of 2,000 MNEMO per note to the burn address. The launch owner may adjust the stamp within the contract's fixed bounds. Ownership transfers require acceptance and renunciation is disabled. Both contracts are configured by their constructors; no initialization calls are required."
+}
