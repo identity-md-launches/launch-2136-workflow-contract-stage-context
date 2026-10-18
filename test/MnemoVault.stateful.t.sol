@@ -141,6 +141,9 @@ contract MnemoVaultStatefulTest is Test {
         handler.writeAsAgent(0, 1, 1, 1);
         _checkAll();
         handler.grant(0, 1, false);
+        handler.grant(0, 1, false); // Re-seal of a granted agent succeeds and does not rotate.
+        handler.grant(0, 1, true); // An empty re-seal is still rejected and leaves the grant.
+        _checkAll();
         handler.approve(1, 4, 0, false);
         handler.writeAsAgent(0, 1, 1, 1);
         _checkAll();
@@ -161,6 +164,7 @@ contract MnemoVaultStatefulTest is Test {
         _checkAll();
         assertGt(handler.successfulWrites(), 2);
         assertEq(handler.successfulForgets(), 1);
+        assertEq(handler.successfulReseals(), 1);
         assertGe(handler.rejectedWrites(), 3);
         assertEq(vault.owner(), actors[1]);
     }

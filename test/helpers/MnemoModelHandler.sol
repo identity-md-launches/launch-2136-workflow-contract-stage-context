@@ -32,6 +32,7 @@ contract MnemoModelHandler is Test {
     uint256 public successfulWrites;
     uint256 public rejectedWrites;
     uint256 public successfulForgets;
+    uint256 public successfulReseals;
 
     constructor(LaunchToken token_, MnemoVault vault_, address[4] memory actors_) {
         token = token_;
@@ -164,14 +165,21 @@ contract MnemoModelHandler is Test {
             reason = abi.encodeWithSelector(MnemoVault.AgentNotRegistered.selector, agent);
         } else if (emptyKey) {
             reason = abi.encodeWithSelector(MnemoVault.EmptySealedKey.selector);
-        } else if (expectedGrant[owner_][agent]) {
-            reason = abi.encodeWithSelector(MnemoVault.AlreadyGranted.selector, owner_, agent);
         }
+        // Granting an already-granted agent is a re-seal: it succeeds, keeps the grant and never rotates.
         bytes memory sealedKey = emptyKey ? bytes("") : bytes(hex"123456");
-        if (reason.length != 0) vm.expectRevert(reason);
+        if (reason.length != 0) {
+            vm.expectRevert(reason);
+        } else {
+            vm.expectEmit(address(vault));
+            emit MnemoVault.Granted(owner_, agent, expectedEpoch[owner_], sealedKey);
+        }
         vm.prank(owner_);
         vault.grant(agent, sealedKey);
-        if (reason.length == 0) expectedGrant[owner_][agent] = true;
+        if (reason.length == 0) {
+            if (expectedGrant[owner_][agent]) ++successfulReseals;
+            expectedGrant[owner_][agent] = true;
+        }
     }
 
     function revoke(uint256 ownerSeed, uint256 agentSeed) external {

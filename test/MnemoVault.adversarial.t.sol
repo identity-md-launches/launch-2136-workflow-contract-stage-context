@@ -375,4 +375,132 @@ contract MnemoVaultAdversarialTest is MnemoTestFixture {
         assertEq(vault.burnedTotal(), 2 * STAMP);
         assertEq(token.totalSupply(), 1e27);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Re-seal: `grant` on an already-granted agent
+    // ---------------------------------------------------------------------------------------------
+
+    function test_resealAfterRotationsCarriesCurrentEpochWithoutRotatingOrCharging() public {
+        _grant(alice, agent);
+        vm.startPrank(alice);
+        vault.rotate();
+        vault.rotate();
+        vm.recordLogs();
+        vault.grant(agent, hex"c0ffee");
+        vm.stopPrank();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "a re-seal emits only Granted, never Rotated");
+        assertEq(logs[0].emitter, address(vault));
+        assertEq(logs[0].topics[0], Granted.selector);
+        assertEq(logs[0].topics[1], bytes32(uint256(uint160(alice))));
+        assertEq(logs[0].topics[2], bytes32(uint256(uint160(agent))));
+        (uint32 epoch, bytes memory sealedKey) = abi.decode(logs[0].data, (uint32, bytes));
+        assertEq(epoch, 2);
+        assertEq(sealedKey, hex"c0ffee");
+
+        assertTrue(vault.isGranted(alice, agent));
+        assertEq(vault.epochOf(alice), 2);
+        assertEq(vault.epochOf(agent), 0);
+        assertEq(token.balanceOf(agent), FUNDS);
+        assertEq(token.balanceOf(alice), FUNDS);
+        assertEq(vault.burnedTotal(), 0);
+
+        vm.expectRevert(abi.encodeWithSelector(MnemoVault.WrongEpoch.selector, 2, 1));
+        _write(agent, true, _notes(1, 1), 1);
+        assertEq(_write(agent, true, _notes(1, 1), 2), 1);
+        assertEq(vault.noteOwnerOf(1), alice);
+        assertEq(token.balanceOf(agent), FUNDS - STAMP);
+    }
+
+    function test_rejectedResealLeavesExistingGrantIntact() public {
+        _grant(alice, agent);
+        vm.startPrank(alice);
+        vm.expectRevert(MnemoVault.EmptySealedKey.selector);
+        vault.grant(agent, "");
+        vm.expectRevert(MnemoVault.SelfGrant.selector);
+        vault.grant(alice, hex"01");
+        vm.expectRevert(MnemoVault.ZeroAddress.selector);
+        vault.grant(address(0), hex"01");
+        vm.stopPrank();
+
+        assertTrue(vault.isGranted(alice, agent));
+        assertEq(vault.epochOf(alice), 0);
+        _write(agent, true, _notes(1, 1), 0);
+        assertEq(vault.noteOwnerOf(1), alice);
+    }
+
+    function test_resealAfterRevokingAnotherAgentKeepsBothGrantsCorrect() public {
+        _grant(alice, agent);
+        _grant(alice, bob);
+        vm.prank(alice);
+        vault.revoke(bob);
+        assertEq(vault.epochOf(alice), 1);
+
+        vm.expectEmit(address(vault));
+        emit Granted(alice, agent, 1, hex"beef");
+        vm.prank(alice);
+        vault.grant(agent, hex"beef");
+
+        assertTrue(vault.isGranted(alice, agent));
+        assertFalse(vault.isGranted(alice, bob), "re-sealing one agent never restores a revoked one");
+        assertEq(vault.epochOf(alice), 1);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(MnemoVault.NotGranted.selector, alice, bob));
+        vault.writeFor(alice, _notes(1, 1), 1);
+        _write(agent, true, _notes(1, 1), 1);
+        assertEq(vault.noteOwnerOf(1), alice);
+    }
+
+    function test_resealIsPerVaultAndAfterAgentKeyReplacement() public {
+        _grant(alice, agent);
+        _grant(bob, agent);
+        vm.prank(bob);
+        vault.rotate();
+        bytes32 replacement = keccak256("replacement agent key");
+        vm.prank(agent);
+        vault.register(replacement);
+
+        vm.expectEmit(address(vault));
+        emit Granted(alice, agent, 0, hex"aa");
+        vm.prank(alice);
+        vault.grant(agent, hex"aa");
+
+        assertEq(vault.keyOf(agent), replacement);
+        assertEq(vault.epochOf(alice), 0);
+        assertEq(vault.epochOf(bob), 1, "a re-seal in Alice's vault never touches Bob's epoch");
+        assertTrue(vault.isGranted(bob, agent));
+        vm.prank(agent);
+        vault.writeFor(bob, _notes(1, 1), 1);
+        assertEq(vault.noteOwnerOf(1), bob);
+    }
+
+    function testFuzz_repeatedResealsNeverMoveEpochOrFunds(uint8 resealSeed, uint8 rotateSeed) public {
+        uint256 reseals = bound(resealSeed, 1, 24);
+        uint256 rotations = bound(rotateSeed, 0, 8);
+        _grant(alice, agent);
+        vm.startPrank(alice);
+        for (uint256 i; i < rotations; ++i) {
+            vault.rotate();
+        }
+        for (uint256 i; i < reseals; ++i) {
+            vm.expectEmit(address(vault));
+            emit Granted(alice, agent, uint32(rotations), abi.encodePacked(i + 1));
+            vault.grant(agent, abi.encodePacked(i + 1));
+        }
+        vm.stopPrank();
+
+        assertEq(vault.epochOf(alice), rotations);
+        assertTrue(vault.isGranted(alice, agent));
+        _assertPristineAccounting();
+
+        // One revoke still removes access no matter how many re-seals came before.
+        vm.prank(alice);
+        vault.revoke(agent);
+        assertFalse(vault.isGranted(alice, agent));
+        assertEq(vault.epochOf(alice), rotations + 1);
+        vm.prank(agent);
+        vm.expectRevert(abi.encodeWithSelector(MnemoVault.NotGranted.selector, alice, agent));
+        vault.writeFor(alice, _notes(1, 1), uint32(rotations + 1));
+    }
 }
